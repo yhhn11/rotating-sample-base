@@ -1,71 +1,99 @@
 #include <Wire.h>
 #include <Adafruit_AS7341.h>
 #include <AccelStepper.h>
-//#include <WiFi.h>
-//#include <HTTPClient.h>
+#include <WiFi.h>
+#include <WiFiManager.h>  
+#include <HTTPClient.h>
 
-#define dirPin 3
-#define stepPin 2
-#define enablePin 4
+#define dirPin 27
+#define stepPin 26
+#define enablePin 25
 
-#define endStopPin 9
+#define endStopPin 33
 
-const char* nome = "TP-Link_7201"; /* NOME DA REDE DE WIFI*/
-const char* senha = "83345173"; /* SENHA DO WIFI*/
 
-String ID_script = "AKfycbyL-8qUhGZtr0MjQl7bOo-Sv6ppyEliFHagdl5tvsPRrUUAizqqjDLpybR4gs6vu3XZ"; /*IDENTIFICAÇÃO DO SCRIPT DA PLANILHA*/
-
+String ID_script = "";
+String ready_str = ""; 
+String gain_str = "";
+String currentLed_str = "";
+String samples_str = "";
+String ReadingType = "";
 
 Adafruit_AS7341 as7341;
 
 String inputString = "";      
-bool stringComplete = false;  
 
 int count;
 
-bool flag = false;
+bool flagDone = true, flagId = false,ready = false;
 
-char command; 
-
-AccelStepper stepper(AccelStepper::DRIVER, stepPin, dirPin);
+AccelStepper stepper(1, stepPin, dirPin);
 
 void setup() {
-  // initialize serial:
-  Serial.begin(115200);
 
-  if (!as7341.begin()){
-    Serial.println("Could not find AS7341");
-    while (1) { delay(10); }
+  pinMode(enablePin, OUTPUT);
+  digitalWrite(enablePin, HIGH);
+  // initialize serial and wait for HMI confirmation command
+  Serial.begin(115200);
+  //delay(5000);
+  while(!ready){
+    ready_str = Serial.readStringUntil(';');
+    if(ready_str == "tdok"){
+      ready = true;
+      Serial.print("espok@");
+    }
+    //delay(50);
+    ready_str = "";
+  }
+  // setup for WiFi
+  WiFiManager wm;
+  wm.setDebugOutput(false);
+  //wm.resetSettings();
+  bool res;
+  res = wm.autoConnect("Smart Table","smart7923"); // password protected ap
+
+    if(WiFi.status() != WL_CONNECTED || !res) {
+        Serial.print("wifinotok@");
+        // ESP.restart();
+    } 
+    else {
+        //if you get here you have connected to the WiFi    
+        Serial.print("wifiok@");
+    }
+  // setup for Google sheets 
+  while(!flagId){
+    ID_script = Serial.readStringUntil('#');
+    if(ID_script.length() > 10){
+      flagId = true;
+      Serial.print("idscriptok@");
+      }
+    }
+  //Sensor startup    
+  while(!as7341.begin()){
+    Serial.print("asnotfound@");
+    delay(500);
   }
   as7341.setATIME(100);
   as7341.setASTEP(999);
-  as7341.setGain(AS7341_GAIN_4X);/* ALTERAR GANHO */
-  as7341.enableLED(true); /* LIGAR(true) DESLIGAR(false) O LED */
-  as7341.setLEDCurrent(10); /* CORRENTE/INTENSIDADE DO LED */
-
-  // reserve 200 bytes for the inputString:
-  inputString.reserve(200);
-
-  /*WiFi.begin(nome, senha);
-  while (WiFi.status() != WL_CONNECTED)
-  {
-    delay(1000);
-    Serial.println("CONECTANDO A REDE...");
-  }
-  Serial.println("CONECTADO A REDE COM SUCESSO");*/
-
+  as7341.setGain(AS7341_GAIN_4X);
+  as7341.enableLED(true); 
+  as7341.setLEDCurrent(10);
+  //configure the enable and limit switch pins
   pinMode(endStopPin, INPUT_PULLUP);
-  pinMode(enablePin, OUTPUT);
   
-  // Habilita o motor
+  // enable stepper motor
   digitalWrite(enablePin, LOW);
   
-  // Define a velocidade do motor
-  stepper.setMaxSpeed(1000);
+  // Define the motor speed
+  stepper.setMaxSpeed(300);
+  stepper.setAcceleration(20);
+  stepper.setSpeed(50);
+}
 
+void resetPosition(){
     // Move o motor até que o interruptor de fim de curso seja acionado
   while (digitalRead(endStopPin) == HIGH) {
-    stepper.moveTo(-5000);
+    stepper.moveTo(5000);
     stepper.run();
   }
   
@@ -75,14 +103,11 @@ void setup() {
 
 void moveStepper(int cells){
   
-  int steps = cells * 15;
+  int steps = cells * 20;
   
-  if (steps != 0) {
-  Serial.print("Você digitou: ");
-  Serial.println(steps);
-  
+  if (steps != 0) { 
   // Move o motor para a posição correspondente ao número digitado
-  stepper.moveTo(steps);
+  stepper.moveTo(-steps);
 
   // Loop para mover o motor de passo gradualmente para a posição desejada
   while (stepper.distanceToGo() != 0) {
@@ -92,25 +117,26 @@ void moveStepper(int cells){
 }
 
 void doReadings(){
-  inputString = inputString.substring(0, inputString.length() - 1);
-  int turns = inputString.toInt();
+  resetPosition();
+  int turns = samples_str.toInt();
   int count = 1;
-  uint16_t storeReadings[turns] [8];
+  float storeReadings[turns] [8] = {{0}} ;
+  float whiteValues[8] = {0};
   for(count;count<turns + 1;count++){
     moveStepper(count);
     for(int i=0;i<10;i++){
       if (!as7341.readAllChannels()){
-        Serial.println("Error reading all channels!"); 
+        Serial.print("erroras@"); 
       }
-      storeReadings[count][0] = storeReadings[count][1] + as7341.getChannel(AS7341_CHANNEL_415nm_F1);
-      storeReadings[count][1] = storeReadings[count][1] + as7341.getChannel(AS7341_CHANNEL_445nm_F2);
-      storeReadings[count][2] = storeReadings[count][2] + as7341.getChannel(AS7341_CHANNEL_480nm_F3);
-      storeReadings[count][3] = storeReadings[count][3] + as7341.getChannel(AS7341_CHANNEL_515nm_F4);
-      storeReadings[count][4] = storeReadings[count][4] + as7341.getChannel(AS7341_CHANNEL_555nm_F5);
-      storeReadings[count][5] = storeReadings[count][5] + as7341.getChannel(AS7341_CHANNEL_590nm_F6);
-      storeReadings[count][6] = storeReadings[count][6] + as7341.getChannel(AS7341_CHANNEL_630nm_F7);
-      storeReadings[count][7] = storeReadings[count][7] + as7341.getChannel(AS7341_CHANNEL_680nm_F8);
-      delay(100);
+      storeReadings[count][0] += as7341.getChannel(AS7341_CHANNEL_415nm_F1);
+      storeReadings[count][1] += as7341.getChannel(AS7341_CHANNEL_445nm_F2);
+      storeReadings[count][2] += as7341.getChannel(AS7341_CHANNEL_480nm_F3);
+      storeReadings[count][3] += as7341.getChannel(AS7341_CHANNEL_515nm_F4);
+      storeReadings[count][4] += as7341.getChannel(AS7341_CHANNEL_555nm_F5);
+      storeReadings[count][5] += as7341.getChannel(AS7341_CHANNEL_590nm_F6);
+      storeReadings[count][6] += as7341.getChannel(AS7341_CHANNEL_630nm_F7);
+      storeReadings[count][7] += as7341.getChannel(AS7341_CHANNEL_680nm_F8);
+      delay(500);
     }
     storeReadings[count] [0] = storeReadings[count] [0] / 10;
     storeReadings[count] [1] = storeReadings[count] [1] / 10;
@@ -121,51 +147,49 @@ void doReadings(){
     storeReadings[count] [6] = storeReadings[count] [6] / 10;
     storeReadings[count] [7] = storeReadings[count] [7] / 10; 
 
-    /*if (WiFi.status() == WL_CONNECTED)
+    if(ReadingType == "ABSORBANCE"){
+      if(count == 1){
+        whiteValues[0] = storeReadings[count][0];
+        whiteValues[1] = storeReadings[count][1];
+        whiteValues[2] = storeReadings[count][2];
+        whiteValues[3] = storeReadings[count][3];
+        whiteValues[4] = storeReadings[count][4];
+        whiteValues[5] = storeReadings[count][5];
+        whiteValues[6] = storeReadings[count][6];
+        whiteValues[7] = storeReadings[count][7];
+      }
+      storeReadings[count][0] = -log10(storeReadings[count][0]/whiteValues[0]);
+      storeReadings[count][1] = -log10(storeReadings[count][1]/whiteValues[1]);
+      storeReadings[count][2] = -log10(storeReadings[count][2]/whiteValues[2]);
+      storeReadings[count][3] = -log10(storeReadings[count][3]/whiteValues[3]);
+      storeReadings[count][4] = -log10(storeReadings[count][4]/whiteValues[4]);
+      storeReadings[count][5] = -log10(storeReadings[count][5]/whiteValues[5]);
+      storeReadings[count][6] = -log10(storeReadings[count][6]/whiteValues[6]);
+      storeReadings[count][7] = -log10(storeReadings[count][7]/whiteValues[7]);
+    }
+
+    if (WiFi.status() == WL_CONNECTED)
     {
     String urlfinal = "https://script.google.com/macros/s/" + ID_script + "/exec?val1=" + String(storeReadings[count][0]) + "&val2=" + String(storeReadings[count][1]) + "&val3=" + String(storeReadings[count][2]) + "&val4=" + String(storeReadings[count][3]) + "&val5=" + String(storeReadings[count][4]) + "&val6=" + String(storeReadings[count][5]) + "&val7=" + String(storeReadings[count][6]) + "&val8=" + String(storeReadings[count][7]);
     HTTPClient http;
     http.begin(urlfinal.c_str());
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     int httpCode = http.GET();
-    Serial.println(" ");
-    Serial.println("HTTP status code: ");
-    Serial.print(httpCode);
-    Serial.println(" ");
     http.end();
-    }*/
+    }
     delay(300);   
-    Serial.print("@");
-    Serial.print(storeReadings[count][0]);
-    Serial.print("A");
-    Serial.print(storeReadings[count][1]);
-    Serial.print("B");
-    Serial.print(storeReadings[count][2]);
-    Serial.print("C");
-    Serial.print(storeReadings[count][3]);
-    Serial.print("D");
-    Serial.print(storeReadings[count][4]);
-    Serial.print("E");
-    Serial.print(storeReadings[count][5]);
-    Serial.print("F");
-    Serial.print(storeReadings[count][6]);
-    Serial.print("G");
-    Serial.print(storeReadings[count][7]);
-    Serial.print("H");
-    Serial.print("\n");
   }  
 }
 
 void setLedCurrent(){
-  String LedCurrent = inputString.substring(0, inputString.length() - 1);
-  int LedValue = LedCurrent.toInt();
+  int LedValue = currentLed_str.toInt();
   if(LedValue < 101){
     as7341.setLEDCurrent(LedValue);    
   }
 }
 
 void setGain(){
-  String strGain = inputString.substring(0, inputString.length() - 1);
+  String strGain = gain_str.substring(0, gain_str.length() - 1);
   int gainValue = strGain.toInt();
 
   switch (gainValue){
@@ -215,57 +239,30 @@ void setGain(){
   }
 }
 
+void breakMesssage() {
+  int scIndex1 = inputString.indexOf(',');
+  int scIndex2 = inputString.indexOf(',', scIndex1 + 1);
+  int scIndex3 = inputString.indexOf(',', scIndex2 + 1);
 
-bool chooseTask(){
+  samples_str = inputString.substring(0, scIndex1);
+  gain_str = inputString.substring(scIndex1 + 1, scIndex2);
+  currentLed_str = inputString.substring(scIndex2 + 1, scIndex3);
+  ReadingType = inputString.substring(scIndex3 + 1);
 
-  if(inputString.equals("reset")){
-    Serial.println("Resetando a posição do motor...");
-    
-    while (digitalRead(endStopPin) == HIGH) {
-      stepper.moveTo(-5000);
-      stepper.run();
-    }
-    // Reseta a posição do motor
-    stepper.setCurrentPosition(0);
-    flag = true;
-  }
-  else{
-    command = inputString.charAt(inputString.length() - 1);
-
-    switch (command){
-      
-    case '#':
-    doReadings();
-    flag = true;
-    break;
-
-    case '*':
-    setLedCurrent();
-    flag = true;
-    break;
-
-    case 'x':
-    setGain();
-    flag = true;
-    break;
-
-    default:
-    flag = false;
-    break;    
-   }
-  }
-  return flag;
 }
 
-void loop() {
-  if (Serial.available() > 0) {
-    // Lê uma string até o caractere de nova linha
-    inputString = Serial.readStringUntil('\n');
-    inputString.trim();  // Remove espaços em branco do início e fim da string
 
-    if(!chooseTask()){
-      Serial.println("Invalid command");
+void loop() {
+  if (Serial.available() && flagDone) {
+    flagDone = false;
+    inputString = Serial.readStringUntil('*');
+    inputString.trim();
+    if(inputString.length() > 3){
+      breakMesssage();
+      setLedCurrent();
+      setGain();
+      doReadings();
     }
-    flag = false;
   }
+  flagDone = true;
 }
